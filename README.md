@@ -3,6 +3,8 @@ A material viewer for James Cameron's Avatar: The Game. Entirely made with AI co
 
 Allows the user to view RGB values, float32 values, integers, etc. Basically see the materials and HEX of what the models use. Stuff like the UV scale, specular power, etc.
 
+This script basically was made mainly for the sole reason of finding the bio/bioluminescent colors of the creatures. Because the game has some materials with "_m" which are mask textures. The bios are also this "_m" masked tetxure and they need the RGB values to display the correct color for the bio on the creatures so with this we can properly get all the values for the RGB colors for these creatures. Simply look for the material you want about the creature and look for something like "Illuminationcolor1" That should be the Bio color and you should see on the color tab, the RGBA color values easily.
+
 Todo List:
 
 1.Fix RGBA texture viewer
