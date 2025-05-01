@@ -3,9 +3,12 @@ A material viewer for James Cameron's Avatar: The Game. Entirely made with AI co
 
 Allows the user to view RGB values, float32 values, integers, etc. Basically see the materials and HEX of what the models use. Stuff like the UV scale, specular power, etc.
 
-Todo List: 
+Todo List:
+
 1.Fix RGBA texture viewer
+
 2. Add proper material viewer.
+
 3. Add RGBA texture support. (Currently it has some issue since i didn't tell the AI to add RGBA support.
 
 This script is **SUPER WIP**.
