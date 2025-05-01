@@ -14,3 +14,7 @@ Use:
 1. Simply double click the .py file to turn on the GUI.
 3. Locate the folder wherever you extracted the data.pak file to. Essential the root folder where it contains the folder for "graphics" such as "\Data\graphics\_materials"
 4. Use the script to view the files/values.
+![image](https://github.com/user-attachments/assets/e218d462-7b37-4853-ab49-897b8f6de1bb)
+![image](https://github.com/user-attachments/assets/5ddf34de-8eae-470c-b626-52db4cdb9abb)
+![image](https://github.com/user-attachments/assets/61993e2a-d127-4a21-a79f-73cf973ec568)
+![image](https://github.com/user-attachments/assets/469a7d56-51da-44f6-8223-8572983a4d3a)
