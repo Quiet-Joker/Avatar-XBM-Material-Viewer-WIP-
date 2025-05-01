@@ -6,6 +6,7 @@ Allows the user to view RGB values, float32 values, integers, etc. Basically see
 Todo List: 
 1.Fix RGBA texture viewer
 2. Add proper material viewer.
+3. Add RGBA texture support. (Currently it has some issue since i didn't tell the AI to add RGBA support.
 
 This script is **SUPER WIP**.
 
