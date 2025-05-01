@@ -13,7 +13,7 @@ Todo List:
 
 3. Add RGBA texture support. (Currently it has some issue since i didn't tell the AI to add RGBA support.
 
-This script is **SUPER WIP**. Some tetxures might not display at all, i still need to find the issue/cause of that.
+This script is **SUPER WIP**. Some textures might not display at all, i still need to find the issue/cause of that.
 
 Use:
 1. Place the script where you have the xbm files at, it can be in "_materials" or in another folder where you can place xbm files one by one.
