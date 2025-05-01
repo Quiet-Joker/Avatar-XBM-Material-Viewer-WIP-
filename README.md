@@ -15,7 +15,7 @@ Todo List:
 
 4. Fix scrolling material list.
 
-5. Fix long freezing/almost crash when loading certain textues.
+5. Fix long freezing/almost crash when loading certain textures.
 
 This script is **SUPER WIP**. Some textures might not display at all, i still need to find the issue/cause of that.
 
