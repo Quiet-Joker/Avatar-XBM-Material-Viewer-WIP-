@@ -13,6 +13,10 @@ Todo List:
 
 3. Add RGBA texture support. (Currently it has some issue since i didn't tell the AI to add RGBA support.
 
+4. Fix scrolling material list.
+
+5. Fix long freezing/almost crash when loading certain textues.
+
 This script is **SUPER WIP**. Some textures might not display at all, i still need to find the issue/cause of that.
 
 Use:
