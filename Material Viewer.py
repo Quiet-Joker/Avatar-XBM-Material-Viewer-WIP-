@@ -312,6 +312,14 @@ class MaterialViewerApp:
         # Add a "Dump Raw Data" button for debugging
         ttk.Button(self.debug_frame, text="Dump Current File", command=self.dump_raw_file).pack(pady=5)
         
+        # Add a "Save Debug Log" button
+        ttk.Button(self.debug_frame, text="Save Debug Log", command=self.save_debug_log).pack(pady=5)
+        
+        # Add info label
+        info_label = ttk.Label(self.debug_frame, text="Check this log for texture loading issues and DDS format info", 
+                              font=('Arial', 9, 'italic'))
+        info_label.pack(pady=5)
+        
         # Initialize status bar
         self.status_bar = ttk.Label(self.main_frame, text="Ready", relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(fill=tk.X, side=tk.BOTTOM, pady=2)
@@ -341,6 +349,21 @@ class MaterialViewerApp:
         self.debug_log.insert(tk.END, f"{message}\n")
         self.debug_log.see(tk.END)
         print(message)  # Also print to console
+    
+    def save_debug_log(self):
+        """Save the debug log to a text file"""
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text File", "*.txt"), ("All Files", "*.*")]
+        )
+        
+        if save_path:
+            try:
+                with open(save_path, 'w') as f:
+                    f.write(self.debug_log.get(1.0, tk.END))
+                messagebox.showinfo("Saved", f"Debug log saved to {save_path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save log: {e}")
     
     def dump_raw_file(self):
         """Dump the currently loaded file to a text file"""
@@ -836,20 +859,68 @@ class MaterialViewerApp:
         
         self.preview_mode = tk.StringVar(value="Combined")
         mode_combo = ttk.Combobox(control_frame, textvariable=self.preview_mode,
-                                 values=["Combined", "Diffuse Only", "Normal Only", "Specular Only", "Reconstructed Normal"],
+                                 values=["Combined", "Diffuse Only", "Normal Only", "Reconstructed Normal", "Specular Only", "Bio Mask Only"],
                                  state="readonly", width=20)
         mode_combo.pack(side=tk.LEFT, padx=5)
-        mode_combo.bind("<<ComboboxSelected>>", lambda e: self.update_material_preview())
+        mode_combo.bind("<<ComboboxSelected>>", lambda e: self.on_preview_mode_change())
         
         # Lighting toggle
         self.preview_lighting = tk.BooleanVar(value=True)
         ttk.Checkbutton(control_frame, text="Apply Lighting", 
                        variable=self.preview_lighting,
-                       command=self.update_material_preview).pack(side=tk.LEFT, padx=10)
+                       command=self.on_preview_setting_change).pack(side=tk.LEFT, padx=10)
+        
+        # High quality texture toggle
+        self.use_high_quality = tk.BooleanVar(value=False)
+        ttk.Checkbutton(control_frame, text="Use MIP0 (High Quality)", 
+                       variable=self.use_high_quality,
+                       command=self.on_preview_setting_change).pack(side=tk.LEFT, padx=10)
+        
+        # Light direction controls
+        ttk.Label(control_frame, text="Light:").pack(side=tk.LEFT, padx=(20, 5))
+        
+        # Light angle (horizontal)
+        self.light_angle = tk.DoubleVar(value=45.0)  # Degrees from front
+        ttk.Label(control_frame, text="Angle:").pack(side=tk.LEFT)
+        self.light_angle_scale = ttk.Scale(control_frame, from_=-180, to=180, variable=self.light_angle,
+                 orient=tk.HORIZONTAL, length=100)
+        self.light_angle_scale.pack(side=tk.LEFT, padx=2)
+        
+        # Light elevation
+        self.light_elevation = tk.DoubleVar(value=30.0)  # Degrees from horizontal
+        ttk.Label(control_frame, text="Elev:").pack(side=tk.LEFT, padx=(10, 0))
+        self.light_elevation_scale = ttk.Scale(control_frame, from_=-90, to=90, variable=self.light_elevation,
+                 orient=tk.HORIZONTAL, length=100)
+        self.light_elevation_scale.pack(side=tk.LEFT, padx=2)
+        
+        # Bind for real-time lighting update while dragging (with throttling)
+        self._update_pending = False
+        def throttled_update(*args):
+            if not self._update_pending:
+                self._update_pending = True
+                # Clear cache to force recalculation
+                self.preview_cache["last_angle"] = None
+                self.preview_cache["last_elevation"] = None
+                self.root.after(50, lambda: (self.update_material_preview(), setattr(self, '_update_pending', False)))
+        
+        self.light_angle.trace('w', throttled_update)
+        self.light_elevation.trace('w', throttled_update)
+        
+        # Store preview cache
+        self.preview_cache = {
+            "last_angle": None,
+            "last_elevation": None,
+            "last_high_quality": None,
+            "cached_result": None
+        }
         
         # Refresh button
         ttk.Button(control_frame, text="Refresh Preview", 
                   command=self.update_material_preview).pack(side=tk.RIGHT, padx=5)
+        
+        # Save preview button
+        ttk.Button(control_frame, text="Save Preview", 
+                  command=self.save_material_preview).pack(side=tk.RIGHT, padx=5)
         
         # Create canvas for preview
         canvas_frame = ttk.Frame(self.material_preview_frame)
@@ -868,14 +939,99 @@ class MaterialViewerApp:
             "diffuse": None,
             "normal": None,
             "specular": None,
+            "bio": None,
             "combined": None,
             "photo": None
         }
+    
+    def on_preview_mode_change(self):
+        """Handle preview mode change - clear cache and update"""
+        self.log_debug(f"Preview mode changed to: {self.preview_mode.get()}")
+        # Clear cache to force reload
+        self.preview_cache["cached_result"] = None
+        self.update_material_preview()
+    
+    def on_preview_setting_change(self):
+        """Handle preview setting change - clear cache and update"""
+        self.log_debug(f"Preview settings changed - Lighting: {self.preview_lighting.get()}, High Quality: {self.use_high_quality.get()}")
+        # Clear cache to force reload
+        self.preview_cache["cached_result"] = None
+        # Clear loaded texture data to force reloading from disk
+        self.preview_data["diffuse"] = None
+        self.preview_data["normal"] = None
+        self.preview_data["specular"] = None
+        self.preview_data["bio"] = None
+        self.preview_data["combined"] = None
+        self.update_material_preview()
+    
+    def save_material_preview(self):
+        """Save the current material preview to a file"""
+        if not self.preview_data.get("combined") and not self.preview_data.get("diffuse"):
+            messagebox.showinfo("No Preview", "Please generate a preview first by clicking 'Refresh Preview'")
+            return
+        
+        try:
+            # Get the appropriate preview image
+            mode = self.preview_mode.get()
+            
+            if mode == "Combined":
+                preview_img = self.preview_data.get("combined")
+            elif mode == "Diffuse Only":
+                preview_img = self.preview_data.get("diffuse")
+            elif mode == "Normal Only" or mode == "Reconstructed Normal":
+                preview_img = self.preview_data.get("normal")
+            elif mode == "Specular Only":
+                preview_img = self.preview_data.get("specular")
+            else:
+                preview_img = self.preview_data.get("combined") or self.preview_data.get("diffuse")
+            
+            if not preview_img:
+                messagebox.showinfo("No Preview", "No preview image available for this mode")
+                return
+            
+            # Get material name for default filename
+            material_name = "material_preview"
+            if self.current_material:
+                material_name = os.path.splitext(os.path.basename(self.current_material))[0]
+            
+            # Ask for save location
+            save_path = filedialog.asksaveasfilename(
+                defaultextension=".png",
+                filetypes=[("PNG Image", "*.png"), ("JPEG Image", "*.jpg"), ("All Files", "*.*")],
+                initialfile=f"{material_name}_preview"
+            )
+            
+            if save_path:
+                # Save the preview image
+                preview_img.save(save_path)
+                self.preview_status.config(text=f"Saved preview to: {os.path.basename(save_path)}")
+                self.status_bar.config(text=f"Saved material preview to: {save_path}")
+                messagebox.showinfo("Saved", f"Preview saved to:\n{save_path}")
+                
+        except Exception as e:
+            import traceback
+            self.log_debug(f"Error saving preview: {e}")
+            self.log_debug(traceback.format_exc())
+            messagebox.showerror("Error", f"Failed to save preview:\n{e}")
     
     def update_material_preview(self):
         """Update the material preview based on loaded textures"""
         if not pil_support:
             self.preview_status.config(text="PIL/Pillow not installed. Cannot generate preview.")
+            return
+        
+        # Check cache to avoid unnecessary recomputation
+        current_angle = self.light_angle.get()
+        current_elev = self.light_elevation.get()
+        current_high_quality = self.use_high_quality.get()
+        
+        # Use cache only if angles AND high quality setting haven't changed
+        if (self.preview_cache["last_angle"] == current_angle and 
+            self.preview_cache["last_elevation"] == current_elev and
+            self.preview_cache.get("last_high_quality") == current_high_quality and
+            self.preview_cache["cached_result"] is not None):
+            # Use cached result
+            self.display_cached_preview()
             return
         
         try:
@@ -885,27 +1041,57 @@ class MaterialViewerApp:
                 self.preview_status.config(text="Please set game data folder path")
                 return
             
-            # Find diffuse, normal, and specular textures
+            # Find diffuse, normal, specular, and bio textures
             diffuse_path = None
             normal_path = None
             specular_path = None
+            bio_path = None
+            
+            # Check if we should use high quality versions
+            use_high_quality = self.use_high_quality.get()
+            self.log_debug(f"High quality mode: {use_high_quality}")
             
             for item in self.texture_tree.get_children():
                 texture_type = self.texture_tree.item(item, "values")[0]
                 texture_path = self.texture_tree.item(item, "values")[1]
+                texture_name = texture_path.lower()
+                
+                # Skip mip0 textures if high quality is disabled, or skip non-mip0 if enabled
+                is_mip0 = '_mip0.xbt' in texture_name
+                
+                # If high quality is enabled, prefer _mip0 versions
+                # If high quality is disabled, skip _mip0 versions
+                if use_high_quality and not is_mip0:
+                    # Check if there's a mip0 version available
+                    mip0_path = texture_path.replace('.xbt', '_mip0.xbt')
+                    mip0_full_path = self.fix_texture_path(mip0_path)
+                    if os.path.exists(mip0_full_path):
+                        self.log_debug(f"Using high quality version: {mip0_path}")
+                        texture_path = mip0_path
+                        texture_name = texture_name.replace('.xbt', '_mip0.xbt')
+                elif not use_high_quality and is_mip0:
+                    # Skip mip0 versions when high quality is disabled
+                    continue
                 
                 full_path = self.fix_texture_path(texture_path)
                 
                 if not os.path.exists(full_path):
+                    self.log_debug(f"Texture not found: {full_path}")
                     continue
                 
-                # Identify texture type based on naming and type
-                if "Diffuse" in texture_type or "_d.xbt" in texture_path.lower():
+                # Identify texture type based on filename suffix (most reliable)
+                if "_d.xbt" in texture_name or "_d_mip0.xbt" in texture_name:
                     diffuse_path = full_path
-                elif "Normal" in texture_type or "_n.xbt" in texture_path.lower():
+                    self.log_debug(f"Found diffuse: {texture_path}")
+                elif "_n.xbt" in texture_name or "_n_mip0.xbt" in texture_name:
                     normal_path = full_path
-                elif "Specular" in texture_type or "Mask" in texture_type or "_m.xbt" in texture_path.lower():
-                    specular_path = full_path  # This is the M/bio mask
+                    self.log_debug(f"Found normal: {texture_path}")
+                elif "_s.xbt" in texture_name or "_s_mip0.xbt" in texture_name:
+                    specular_path = full_path
+                    self.log_debug(f"Found specular: {texture_path}")
+                elif "_m.xbt" in texture_name or "_m_mip0.xbt" in texture_name:
+                    bio_path = full_path
+                    self.log_debug(f"Found bio/emission: {texture_path}")
             
             # Load textures
             mode = self.preview_mode.get()
@@ -917,8 +1103,19 @@ class MaterialViewerApp:
                 preview_img = self.convert_xbt_to_image(normal_path)
                 self.preview_data["normal"] = preview_img
             elif mode == "Specular Only" and specular_path:
-                preview_img = self.convert_xbt_to_image(specular_path)
+                specular_img = self.convert_xbt_to_image(specular_path)
+                # Detect if specular is colored or B&W
+                is_colored = self.is_texture_colored(specular_img)
+                if is_colored:
+                    self.log_debug("Specular texture is colored - treating as RGB")
+                    preview_img = specular_img
+                else:
+                    self.log_debug("Specular texture is B&W - treating as grayscale")
+                    preview_img = specular_img.convert('L').convert('RGB')
                 self.preview_data["specular"] = preview_img
+            elif mode == "Bio Mask Only" and bio_path:
+                preview_img = self.convert_xbt_to_image(bio_path)
+                self.preview_data["bio"] = preview_img
             elif mode == "Reconstructed Normal" and normal_path:
                 # Load and reconstruct the normal map
                 normal_tex = self.convert_xbt_to_image(normal_path)
@@ -928,19 +1125,46 @@ class MaterialViewerApp:
                 # Load all available textures
                 if diffuse_path:
                     self.preview_data["diffuse"] = self.convert_xbt_to_image(diffuse_path)
+                    self.log_debug(f"Loaded diffuse: {self.preview_data['diffuse'].size}")
                 if normal_path:
                     self.preview_data["normal"] = self.convert_xbt_to_image(normal_path)
+                    self.log_debug(f"Loaded normal: {self.preview_data['normal'].size}")
                 if specular_path:
-                    self.preview_data["specular"] = self.convert_xbt_to_image(specular_path)
+                    specular_img = self.convert_xbt_to_image(specular_path)
+                    self.log_debug(f"Loaded specular: {specular_img.size}")
+                    # Detect if specular is colored or B&W and store accordingly
+                    is_colored = self.is_texture_colored(specular_img)
+                    if not is_colored:
+                        self.log_debug("Converting B&W specular to grayscale")
+                        specular_img = specular_img.convert('L').convert('RGB')
+                    self.preview_data["specular"] = specular_img
+                if bio_path:
+                    self.preview_data["bio"] = self.convert_xbt_to_image(bio_path)
+                    self.log_debug(f"Loaded bio: {self.preview_data['bio'].size}")
                 
                 # Combine textures
                 preview_img = self.combine_material_maps()
+                if preview_img:
+                    self.log_debug(f"Combined result size: {preview_img.size}")
+                else:
+                    self.preview_status.config(text="Failed to combine textures")
+                    return
             else:
                 self.preview_status.config(text="Required texture not found")
                 return
             
             # Display preview
             if preview_img:
+                # Store the original size before any resizing
+                original_width = preview_img.width
+                original_height = preview_img.height
+                
+                # Cache the result before display
+                self.preview_cache["last_angle"] = current_angle
+                self.preview_cache["last_elevation"] = current_elev
+                self.preview_cache["last_high_quality"] = current_high_quality
+                self.preview_cache["cached_result"] = preview_img.copy()
+                
                 # Resize to fit canvas
                 canvas_width = self.preview_canvas.winfo_width()
                 canvas_height = self.preview_canvas.winfo_height()
@@ -966,7 +1190,8 @@ class MaterialViewerApp:
                 # Store reference
                 self.preview_data["photo"] = photo
                 
-                self.preview_status.config(text=f"Preview: {mode} ({preview_img.width}x{preview_img.height})")
+                # Show the ORIGINAL size, not the scaled display size
+                self.preview_status.config(text=f"Preview: {mode} ({original_width}x{original_height})")
             
         except Exception as e:
             import traceback
@@ -974,44 +1199,114 @@ class MaterialViewerApp:
             self.log_debug(traceback.format_exc())
             self.preview_status.config(text=f"Error: {e}")
     
+    def display_cached_preview(self):
+        """Display the cached preview without recomputation"""
+        preview_img = self.preview_cache["cached_result"]
+        if not preview_img:
+            return
+        
+        # Store original size
+        original_width = preview_img.width
+        original_height = preview_img.height
+        
+        # Resize to fit canvas
+        canvas_width = self.preview_canvas.winfo_width()
+        canvas_height = self.preview_canvas.winfo_height()
+        
+        if canvas_width > 1 and canvas_height > 1:
+            scale = min(canvas_width / preview_img.width, 
+                       canvas_height / preview_img.height) * 0.9
+            
+            new_size = (int(preview_img.width * scale), 
+                       int(preview_img.height * scale))
+            preview_img = preview_img.resize(new_size, Image.LANCZOS)
+        
+        # Convert to PhotoImage
+        photo = ImageTk.PhotoImage(preview_img)
+        
+        # Display on canvas
+        self.preview_canvas.delete("all")
+        x = self.preview_canvas.winfo_width() // 2
+        y = self.preview_canvas.winfo_height() // 2
+        self.preview_canvas.create_image(x, y, image=photo)
+        
+        # Store reference
+        self.preview_data["photo"] = photo
+        
+        # Update status with original size
+        mode = self.preview_mode.get()
+        self.preview_status.config(text=f"Preview: {mode} ({original_width}x{original_height})")
+    
     def combine_material_maps(self):
-        """Combine diffuse, normal, and specular maps into a preview"""
+        """Combine diffuse, normal, and bio maps into a preview
+        
+        Rendering order (like DX9):
+        1. Apply lighting to diffuse using normal map
+        2. Add bio emission on top (additive, unaffected by lighting)
+        """
         try:
             diffuse = self.preview_data.get("diffuse")
             normal = self.preview_data.get("normal")
-            mask = self.preview_data.get("specular")  # This is actually the M/bio mask
+            bio_mask = self.preview_data.get("bio")
+            specular = self.preview_data.get("specular")  # For future use
             
             if not diffuse:
                 return None
             
+            # Find the largest texture dimensions
+            max_width = diffuse.width
+            max_height = diffuse.height
+            
+            if normal and (normal.width > max_width or normal.height > max_height):
+                max_width = max(max_width, normal.width)
+                max_height = max(max_height, normal.height)
+                self.log_debug(f"Normal map is larger: {normal.width}x{normal.height}")
+            
+            if bio_mask and (bio_mask.width > max_width or bio_mask.height > max_height):
+                max_width = max(max_width, bio_mask.width)
+                max_height = max(max_height, bio_mask.height)
+                self.log_debug(f"Bio mask is larger: {bio_mask.width}x{bio_mask.height}")
+            
+            if specular and (specular.width > max_width or specular.height > max_height):
+                max_width = max(max_width, specular.width)
+                max_height = max(max_height, specular.height)
+                self.log_debug(f"Specular is larger: {specular.width}x{specular.height}")
+            
+            self.log_debug(f"Using maximum resolution: {max_width}x{max_height}")
+            
+            # Resize diffuse to maximum dimensions if needed
+            if diffuse.size != (max_width, max_height):
+                self.log_debug(f"Upscaling diffuse from {diffuse.size} to {max_width}x{max_height}")
+                diffuse = diffuse.resize((max_width, max_height), Image.LANCZOS)
+            
             # Start with diffuse as base
             result = diffuse.copy().convert('RGBA')
-            result_pixels = result.load()
             
-            # Get illumination color for bio/emission
-            illumination_color = self.get_illumination_color()
-            
-            # Apply lighting if enabled
-            if self.preview_lighting.get():
-                # Reconstruct normal map properly
-                if normal:
-                    # Resize normal map if needed
-                    if normal.size != result.size:
-                        normal = normal.resize(result.size, Image.LANCZOS)
-                    
-                    # Reconstruct the normal map from packed format
-                    normal_reconstructed = self.reconstruct_normal_map(normal)
-                    
-                    # Apply simple lighting using reconstructed normal
-                    result = self.apply_simple_lighting(result, normal_reconstructed)
+            # Step 1: Apply lighting if enabled and normal map exists
+            if self.preview_lighting.get() and normal:
+                # Resize normal map to match result if needed
+                if normal.size != result.size:
+                    self.log_debug(f"Resizing normal map from {normal.size} to {result.size}")
+                    normal = normal.resize(result.size, Image.LANCZOS)
                 
-                # Apply bio/emission mask with illumination color
-                if mask and illumination_color:
-                    # Resize mask if needed
-                    if mask.size != result.size:
-                        mask = mask.resize(result.size, Image.LANCZOS)
+                # Reconstruct the normal map from packed format
+                normal_reconstructed = self.reconstruct_normal_map(normal)
+                
+                # Apply lighting using reconstructed normal
+                result = self.apply_simple_lighting(result, normal_reconstructed)
+                self.log_debug("Applied lighting to diffuse")
+            
+            # Step 2: Add bio emission ON TOP of lit surface (not affected by lighting)
+            if bio_mask:
+                illumination_color = self.get_illumination_color()
+                if illumination_color:
+                    # Resize bio mask to match result if needed
+                    if bio_mask.size != result.size:
+                        self.log_debug(f"Resizing bio mask from {bio_mask.size} to {result.size}")
+                        bio_mask = bio_mask.resize(result.size, Image.LANCZOS)
                     
-                    result = self.apply_bio_emission(result, mask, illumination_color)
+                    result = self.apply_bio_emission(result, bio_mask, illumination_color)
+                    self.log_debug("Applied bio emission on top")
             
             return result
             
@@ -1021,16 +1316,65 @@ class MaterialViewerApp:
             self.log_debug(traceback.format_exc())
             return self.preview_data.get("diffuse")
     
-    def reconstruct_normal_map(self, normal_texture):
-        """Reconstruct normal map from packed format.
+    def is_texture_colored(self, texture):
+        """Check if a texture has colored pixels (not just grayscale)
         
-        In Avatar's format:
-        - G channel contains the Y (green) normal component
-        - A channel contains the X (red) normal component  
-        - B channel needs to be calculated from X and Y
+        Returns True if the texture has color variation, False if it's B&W/grayscale
         """
         try:
-            self.log_debug("Reconstructing normal map from packed format")
+            # Convert to RGB if needed
+            if texture.mode != 'RGB' and texture.mode != 'RGBA':
+                texture = texture.convert('RGB')
+            
+            # Sample pixels to check for color
+            width, height = texture.size
+            pixels = list(texture.getdata())
+            
+            # Sample up to 1000 pixels evenly distributed
+            sample_count = min(1000, len(pixels))
+            sample_step = len(pixels) // sample_count
+            
+            colored_pixels = 0
+            threshold = 5  # Tolerance for color difference (out of 255)
+            
+            for i in range(0, len(pixels), sample_step):
+                if texture.mode == 'RGBA':
+                    r, g, b, a = pixels[i]
+                else:
+                    r, g, b = pixels[i]
+                
+                # Check if RGB values differ significantly (indicating color)
+                if abs(r - g) > threshold or abs(g - b) > threshold or abs(r - b) > threshold:
+                    colored_pixels += 1
+                    
+                    # If we find enough colored pixels, it's definitely colored
+                    if colored_pixels > 10:
+                        self.log_debug(f"Texture is colored: found {colored_pixels} colored pixels in sample")
+                        return True
+            
+            # If very few colored pixels, treat as B&W
+            is_colored = colored_pixels > 5
+            self.log_debug(f"Texture color check: {colored_pixels} colored pixels out of {sample_count} samples - {'Colored' if is_colored else 'B&W'}")
+            return is_colored
+            
+        except Exception as e:
+            self.log_debug(f"Error checking texture color: {e}")
+            # Default to treating as colored to be safe
+            return True
+    
+    def reconstruct_normal_map(self, normal_texture):
+        """Reconstruct normal map from Avatar's packed format.
+        
+        Avatar's format:
+        - RGB channels all contain the Y (green) normal component
+        - A (alpha) channel contains the X (red) normal component  
+        - B (blue) channel needs to be calculated from X and Y
+        
+        The normal vector is: (X=alpha, Y=green, Z=calculated)
+        """
+        try:
+            self.log_debug("Reconstructing normal map from Avatar's packed format")
+            self.log_debug("Format: X from Alpha, Y from Green, Z calculated")
             
             # Convert to RGBA to access all channels
             if normal_texture.mode != 'RGBA':
@@ -1046,9 +1390,9 @@ class MaterialViewerApp:
                 for x in range(width):
                     r, g, b, a = normal_pixels[x, y]
                     
-                    # Extract components:
+                    # Extract components from Avatar's format:
                     # X (red) is stored in alpha channel
-                    # Y (green) is stored in green channel
+                    # Y (green) is stored in green channel (R and B also have it but we use G)
                     nx = (a / 255.0) * 2.0 - 1.0  # Remap from [0,255] to [-1,1]
                     ny = (g / 255.0) * 2.0 - 1.0  # Remap from [0,255] to [-1,1]
                     
@@ -1057,10 +1401,13 @@ class MaterialViewerApp:
                     nz_squared = max(0.0, 1.0 - nx*nx - ny*ny)
                     nz = nz_squared ** 0.5
                     
-                    # Convert back to [0,255] range
-                    final_r = int((nx + 1.0) * 0.5 * 255)
-                    final_g = int((ny + 1.0) * 0.5 * 255)
-                    final_b = int((nz + 1.0) * 0.5 * 255)
+                    # Note: Z is always positive (pointing outward from surface)
+                    # In tangent space, Z=1 means pointing straight out
+                    
+                    # Convert back to [0,255] range for display
+                    final_r = int((nx + 1.0) * 0.5 * 255)  # X component
+                    final_g = int((ny + 1.0) * 0.5 * 255)  # Y component
+                    final_b = int((nz + 1.0) * 0.5 * 255)  # Z component (calculated)
                     
                     # Clamp values
                     final_r = max(0, min(255, final_r))
@@ -1070,6 +1417,7 @@ class MaterialViewerApp:
                     recon_pixels[x, y] = (final_r, final_g, final_b)
             
             self.log_debug("Normal map reconstruction complete")
+            self.log_debug("Result: RGB = (X, Y, Z) tangent-space normal in [0,255] range")
             return reconstructed
             
         except Exception as e:
@@ -1079,57 +1427,278 @@ class MaterialViewerApp:
             return normal_texture.convert('RGB')
     
     def apply_simple_lighting(self, diffuse, normal_map):
-        """Apply simple directional lighting using the normal map"""
+        """Apply improved PBR-style per-pixel lighting with specular highlights (GPU-accelerated)
+        
+        This creates more realistic material appearance with proper:
+        - Diffuse (Lambertian) shading from normals
+        - Specular highlights (Blinn-Phong)
+        - Rim lighting for depth
+        - Proper color space handling
+        
+        Uses GPU acceleration via CuPy (CUDA) if available, falls back to NumPy CPU.
+        """
         try:
-            self.log_debug("Applying lighting based on normal map")
+            self.log_debug("Applying lighting with GPU acceleration")
             
-            # Simple light direction (from top-left-front)
-            light_dir = (0.5, 0.5, 0.8)  # Normalized-ish direction
+            # Try to use CuPy for TRUE GPU acceleration (CUDA)
+            np = None
+            cp = None  # Store CuPy reference separately
+            use_gpu = False
+            use_cpu_vectorized = False
             
-            width, height = diffuse.size
-            result = diffuse.copy()
+            try:
+                # Force fresh import by clearing any cached CuPy modules
+                import sys
+                if 'cupy' in sys.modules:
+                    self.log_debug("CuPy already imported, using existing module")
+                else:
+                    self.log_debug("First time importing CuPy")
+                
+                import cupy as cp
+                # Verify CuPy module has required attributes
+                if not hasattr(cp, 'array'):
+                    raise AttributeError("CuPy module is incomplete or shadowed by another file")
+                
+                # Test if CuPy is working properly by creating a test array
+                test_array = cp.array([1.0, 2.0, 3.0])
+                self.log_debug(f"CuPy test array created: {test_array}")
+                
+                np = cp  # Use CuPy as np for array operations
+                use_gpu = True
+                self.log_debug("✓ CuPy WORKING - using CUDA GPU acceleration on your RTX 5070 Ti!")
+            except (ImportError, AttributeError, Exception) as e:
+                # CuPy not available or not working properly
+                self.log_debug(f"⚠ CuPy issue detected: {type(e).__name__}: {e}")
+                
+                # Try to diagnose the issue
+                try:
+                    import sys
+                    import cupy
+                    self.log_debug(f"CuPy module location: {cupy.__file__}")
+                    self.log_debug(f"CuPy module attributes: {dir(cupy)[:10]}...")
+                except:
+                    pass
+                
+                # Fall back to NumPy
+                try:
+                    import numpy as np
+                    use_cpu_vectorized = True
+                    self.log_debug("✓ Using NumPy CPU vectorization (CuPy failed, install properly for GPU support)")
+                except ImportError:
+                    self.log_debug("✗ No acceleration available - using slow pixel-by-pixel method")
             
-            diffuse_pixels = diffuse.load()
-            normal_pixels = normal_map.load()
-            result_pixels = result.load()
+            # Get light direction from UI sliders
+            import math
+            angle_rad = math.radians(self.light_angle.get())
+            elev_rad = math.radians(self.light_elevation.get())
             
-            for y in range(height):
-                for x in range(width):
-                    # Get normal from normal map
-                    nr, ng, nb = normal_pixels[x, y]
-                    
-                    # Convert to [-1, 1] range
-                    nx = (nr / 255.0) * 2.0 - 1.0
-                    ny = (ng / 255.0) * 2.0 - 1.0
-                    nz = (nb / 255.0) * 2.0 - 1.0
-                    
-                    # Calculate dot product with light direction
-                    dot = max(0.0, nx * light_dir[0] + ny * light_dir[1] + nz * light_dir[2])
-                    
-                    # Apply to diffuse color
-                    if diffuse.mode == 'RGBA':
-                        dr, dg, db, da = diffuse_pixels[x, y]
-                    else:
-                        dr, dg, db = diffuse_pixels[x, y]
-                        da = 255
-                    
-                    # Mix ambient (0.3) and diffuse lighting
-                    ambient = 0.3
-                    lighting = ambient + (1.0 - ambient) * dot
-                    
-                    lit_r = int(dr * lighting)
-                    lit_g = int(dg * lighting)
-                    lit_b = int(db * lighting)
-                    
-                    # Clamp values
-                    lit_r = max(0, min(255, lit_r))
-                    lit_g = max(0, min(255, lit_g))
-                    lit_b = max(0, min(255, lit_b))
-                    
-                    result_pixels[x, y] = (lit_r, lit_g, lit_b, da)
+            # Convert to normalized direction vector (pointing FROM light TO surface)
+            light_x = -math.cos(elev_rad) * math.sin(angle_rad)
+            light_y = -math.sin(elev_rad)
+            light_z = -math.cos(elev_rad) * math.cos(angle_rad)
             
-            self.log_debug("Lighting application complete")
-            return result
+            # Normalize the light direction
+            length = math.sqrt(light_x**2 + light_y**2 + light_z**2)
+            light_dir = np.array([light_x / length, light_y / length, light_z / length]) if (use_gpu or use_cpu_vectorized) else (light_x / length, light_y / length, light_z / length)
+            
+            self.log_debug(f"Light direction (normalized): ({light_dir[0]:.2f}, {light_dir[1]:.2f}, {light_dir[2]:.2f})")
+            
+            # View direction (camera looking straight at surface)
+            view_dir = np.array([0.0, 0.0, 1.0]) if (use_gpu or use_cpu_vectorized) else (0.0, 0.0, 1.0)
+            
+            # Light properties
+            key_light_color = np.array([1.0, 0.98, 0.95]) if (use_gpu or use_cpu_vectorized) else (1.0, 0.98, 0.95)
+            key_light_intensity = 1.0
+            ambient_color = np.array([0.35, 0.38, 0.42]) if (use_gpu or use_cpu_vectorized) else (0.35, 0.38, 0.42)
+            ambient_intensity = 0.15
+            
+            # Specular properties
+            specular_power = 32.0
+            specular_intensity = 0.4
+            rim_intensity = 0.15
+            rim_color = np.array([0.7, 0.8, 0.9]) if (use_gpu or use_cpu_vectorized) else (0.7, 0.8, 0.9)
+            
+            if use_gpu or use_cpu_vectorized:
+                # FAST PATH: GPU or CPU vectorized operations
+                if use_gpu:
+                    self.log_debug("Converting images to CuPy arrays for TRUE GPU processing on RTX 5070 Ti")
+                else:
+                    self.log_debug("Converting images to NumPy arrays for CPU vectorized processing")
+                
+                # Convert images to numpy arrays (float32 for better performance)
+                diffuse_array = np.array(diffuse, dtype=np.float32) / 255.0
+                normal_array = np.array(normal_map, dtype=np.float32) / 255.0
+                
+                # Extract channels
+                if diffuse_array.shape[2] == 4:
+                    diffuse_rgb = diffuse_array[:, :, :3]
+                    alpha = diffuse_array[:, :, 3:4]
+                else:
+                    diffuse_rgb = diffuse_array
+                    alpha = np.ones((*diffuse_array.shape[:2], 1), dtype=np.float32)
+                
+                # Convert normals from [0,1] to [-1,1]
+                normals = normal_array[:, :, :3] * 2.0 - 1.0
+                
+                # Normalize normals
+                norm_length = np.sqrt(np.sum(normals**2, axis=2, keepdims=True))
+                norm_length = np.maximum(norm_length, 1e-8)  # Avoid division by zero
+                normals = normals / norm_length
+                
+                # Convert diffuse to linear space (gamma 2.2)
+                diffuse_linear = diffuse_rgb ** 2.2
+                
+                # Calculate N·L (Lambertian diffuse)
+                ndotl = np.sum(normals * light_dir, axis=2, keepdims=True)
+                ndotl = np.maximum(ndotl, 0.0)
+                
+                # Calculate half vector for specular
+                half_vec = light_dir + view_dir
+                half_length = np.sqrt(np.sum(half_vec**2))
+                half_vec = half_vec / half_length
+                
+                # Calculate N·H for specular
+                ndoth = np.sum(normals * half_vec, axis=2, keepdims=True)
+                ndoth = np.maximum(ndoth, 0.0)
+                specular = (ndoth ** specular_power) * specular_intensity
+                specular = np.where(ndotl > 0, specular, 0.0)
+                
+                # Calculate N·V for rim lighting
+                ndotv = np.sum(normals * view_dir, axis=2, keepdims=True)
+                ndotv = np.maximum(ndotv, 0.0)
+                rim = ((1.0 - ndotv) ** 3.0) * rim_intensity
+                
+                # Calculate lighting components
+                ambient = diffuse_linear * ambient_color * ambient_intensity
+                diffuse_lit = diffuse_linear * key_light_color * key_light_intensity * ndotl
+                spec = specular * key_light_color
+                rim_lit = rim * rim_color
+                
+                # Combine all lighting
+                final_linear = ambient + diffuse_lit + spec + rim_lit
+                
+                # Convert back to sRGB (gamma 2.2)
+                final_srgb = final_linear ** (1.0 / 2.2)
+                
+                # Clamp and convert to uint8
+                final_srgb = np.clip(final_srgb, 0.0, 1.0)
+                final_array = (final_srgb * 255.0).astype(np.uint8)
+                
+                # Add alpha channel back
+                if diffuse_array.shape[2] == 4:
+                    alpha_uint8 = (alpha * 255.0).astype(np.uint8)
+                    final_array = np.concatenate([final_array, alpha_uint8], axis=2)
+                
+                # Convert back to PIL Image
+                if use_gpu:
+                    # Convert CuPy array back to NumPy for PIL
+                    final_array = cp.asnumpy(final_array)
+                
+                result = Image.fromarray(final_array, 'RGBA' if diffuse_array.shape[2] == 4 else 'RGB')
+                
+                if use_gpu:
+                    self.log_debug(f"✓ GPU lighting complete - processed {diffuse_array.shape[0] * diffuse_array.shape[1]} pixels on RTX 5070 Ti")
+                else:
+                    self.log_debug(f"CPU lighting complete - processed {diffuse_array.shape[0] * diffuse_array.shape[1]} pixels (vectorized)")
+                return result
+            
+            else:
+                # SLOW PATH: Fallback for when NumPy is not available
+                width, height = diffuse.size
+                result = diffuse.copy()
+                
+                diffuse_pixels = diffuse.load()
+                normal_pixels = normal_map.load()
+                result_pixels = result.load()
+                
+                key_light_dir = light_dir
+                
+                for y in range(height):
+                    for x in range(width):
+                        # Get normal from normal map
+                        nr, ng, nb = normal_pixels[x, y]
+                        
+                        # Convert to [-1, 1] range
+                        nx = (nr / 255.0) * 2.0 - 1.0
+                        ny = (ng / 255.0) * 2.0 - 1.0
+                        nz = (nb / 255.0) * 2.0 - 1.0
+                        
+                        # Normalize
+                        n_len = math.sqrt(nx*nx + ny*ny + nz*nz)
+                        if n_len > 0:
+                            nx /= n_len
+                            ny /= n_len
+                            nz /= n_len
+                        
+                        # Calculate N·L
+                        ndotl = max(0.0, nx * key_light_dir[0] + ny * key_light_dir[1] + nz * key_light_dir[2])
+                        
+                        # Calculate specular
+                        hx = key_light_dir[0] + view_dir[0]
+                        hy = key_light_dir[1] + view_dir[1]
+                        hz = key_light_dir[2] + view_dir[2]
+                        h_len = math.sqrt(hx*hx + hy*hy + hz*hz)
+                        if h_len > 0:
+                            hx /= h_len
+                            hy /= h_len
+                            hz /= h_len
+                        
+                        ndoth = max(0.0, nx * hx + ny * hy + nz * hz)
+                        specular = (ndoth ** specular_power) * specular_intensity if ndotl > 0 else 0.0
+                        
+                        # Rim lighting
+                        ndotv = max(0.0, nx * view_dir[0] + ny * view_dir[1] + nz * view_dir[2])
+                        rim = (1.0 - ndotv) ** 3.0 * rim_intensity
+                        
+                        # Get diffuse color
+                        if diffuse.mode == 'RGBA':
+                            dr, dg, db, da = diffuse_pixels[x, y]
+                        else:
+                            dr, dg, db = diffuse_pixels[x, y]
+                            da = 255
+                        
+                        # Convert to linear space
+                        dr_lin = (dr / 255.0) ** 2.2
+                        dg_lin = (dg / 255.0) ** 2.2
+                        db_lin = (db / 255.0) ** 2.2
+                        
+                        # Calculate lighting
+                        ambient_r = dr_lin * ambient_color[0] * ambient_intensity
+                        ambient_g = dg_lin * ambient_color[1] * ambient_intensity
+                        ambient_b = db_lin * ambient_color[2] * ambient_intensity
+                        
+                        diffuse_r = dr_lin * key_light_color[0] * key_light_intensity * ndotl
+                        diffuse_g = dg_lin * key_light_color[1] * key_light_intensity * ndotl
+                        diffuse_b = db_lin * key_light_color[2] * key_light_intensity * ndotl
+                        
+                        spec_r = specular * key_light_color[0]
+                        spec_g = specular * key_light_color[1]
+                        spec_b = specular * key_light_color[2]
+                        
+                        rim_r = rim * rim_color[0]
+                        rim_g = rim * rim_color[1]
+                        rim_b = rim * rim_color[2]
+                        
+                        # Combine
+                        final_r_lin = ambient_r + diffuse_r + spec_r + rim_r
+                        final_g_lin = ambient_g + diffuse_g + spec_g + rim_g
+                        final_b_lin = ambient_b + diffuse_b + spec_b + rim_b
+                        
+                        # Convert back to sRGB
+                        final_r = (final_r_lin ** (1.0/2.2)) * 255.0
+                        final_g = (final_g_lin ** (1.0/2.2)) * 255.0
+                        final_b = (final_b_lin ** (1.0/2.2)) * 255.0
+                        
+                        # Clamp
+                        final_r = max(0, min(255, int(final_r)))
+                        final_g = max(0, min(255, int(final_g)))
+                        final_b = max(0, min(255, int(final_b)))
+                        
+                        result_pixels[x, y] = (final_r, final_g, final_b, da)
+                
+                self.log_debug("CPU per-pixel lighting complete (slow fallback method)")
+                self.log_debug("WARNING: Install NumPy for massive performance improvements!")
+                return result
             
         except Exception as e:
             self.log_debug(f"Error applying lighting: {e}")
@@ -1138,7 +1707,11 @@ class MaterialViewerApp:
             return diffuse
     
     def apply_bio_emission(self, base_image, mask_texture, illumination_color):
-        """Apply bio/emission glow using the mask and illumination color"""
+        """Apply bio/emission glow using the mask and illumination color
+        
+        Bio emission in Avatar is additive - it adds light on top of the base material.
+        The M (bio) texture is a grayscale mask where white = full glow.
+        """
         try:
             self.log_debug(f"Applying bio emission with color: {illumination_color}")
             
@@ -1159,16 +1732,20 @@ class MaterialViewerApp:
             
             self.log_debug(f"Illumination RGB: ({illum_r}, {illum_g}, {illum_b})")
             
+            # Bio emission intensity (adjust this to match game brightness)
+            emission_boost = 1.2  # How bright the bio glow is
+            
             for y in range(height):
                 for x in range(width):
-                    # Get mask value (use red channel as intensity)
+                    # Get mask value (grayscale - use average of RGB)
                     if mask_texture.mode == 'RGBA':
                         mask_r, mask_g, mask_b, mask_a = mask_pixels[x, y]
                     else:
                         mask_r, mask_g, mask_b = mask_pixels[x, y]
                     
-                    # Use red channel as emission mask intensity
-                    emission_strength = mask_r / 255.0
+                    # Use average of RGB channels as emission mask intensity
+                    # (some textures might have it in different channels)
+                    emission_strength = ((mask_r + mask_g + mask_b) / 3.0) / 255.0
                     
                     # Get base color
                     if base_image.mode == 'RGBA':
@@ -1177,16 +1754,16 @@ class MaterialViewerApp:
                         br, bg, bb = base_pixels[x, y]
                         ba = 255
                     
-                    # Blend emission color on top of base
-                    final_r = int(br * (1.0 - emission_strength) + illum_r * emission_strength)
-                    final_g = int(bg * (1.0 - emission_strength) + illum_g * emission_strength)
-                    final_b = int(bb * (1.0 - emission_strength) + illum_b * emission_strength)
+                    # Add emission on top of base (additive blending)
+                    # This is how DX9 emissive works - adds light, doesn't replace
+                    final_r = br + int(illum_r * emission_strength * emission_boost)
+                    final_g = bg + int(illum_g * emission_strength * emission_boost)
+                    final_b = bb + int(illum_b * emission_strength * emission_boost)
                     
-                    # Add extra brightness for emission
-                    boost = 1.5  # Emission brightness boost
-                    final_r = min(255, int(final_r + (illum_r * emission_strength * boost)))
-                    final_g = min(255, int(final_g + (illum_g * emission_strength * boost)))
-                    final_b = min(255, int(final_b + (illum_b * emission_strength * boost)))
+                    # Clamp to prevent overflow
+                    final_r = min(255, final_r)
+                    final_g = min(255, final_g)
+                    final_b = min(255, final_b)
                     
                     result_pixels[x, y] = (final_r, final_g, final_b, ba)
             
@@ -1543,9 +2120,23 @@ class MaterialViewerApp:
             
             # Check if this has an XBT header (TBX)
             if xbt_data[:3] == b'TBX':
-                self.log_debug("TBX header found, removing header bytes")
-                # XBT header is 32 bytes
-                dds_data = xbt_data[32:]
+                self.log_debug("TBX header found")
+                
+                # Read the header size from offset 8 (4 bytes, little-endian)
+                if len(xbt_data) >= 12:
+                    header_size = struct.unpack('<I', xbt_data[8:12])[0]
+                    self.log_debug(f"XBT header size from file: {header_size} bytes")
+                    
+                    # Verify header size is reasonable (between 32 and 1024 bytes)
+                    if 32 <= header_size <= 1024 and header_size < len(xbt_data):
+                        dds_data = xbt_data[header_size:]
+                        self.log_debug(f"Skipped {header_size} byte header")
+                    else:
+                        self.log_debug(f"Header size {header_size} seems invalid, trying 32 bytes")
+                        dds_data = xbt_data[32:]
+                else:
+                    self.log_debug("File too small to read header size, trying 32 bytes")
+                    dds_data = xbt_data[32:]
             else:
                 self.log_debug("No TBX header found, trying full data as DDS")
                 dds_data = xbt_data
@@ -1561,9 +2152,36 @@ class MaterialViewerApp:
                             self.log_debug(f"Found valid DDS at offset {header_size}")
                             dds_data = test_data
                             break
+            
+            # Log DDS format information
+            if len(dds_data) >= 128:
+                # DDS header structure
+                size = struct.unpack('<I', dds_data[4:8])[0]
+                flags = struct.unpack('<I', dds_data[8:12])[0]
+                height = struct.unpack('<I', dds_data[12:16])[0]
+                width = struct.unpack('<I', dds_data[16:20])[0]
                 
-            # Save the DDS data to a temporary file
-            temp_dds_path = os.path.join(self.temp_dir, os.path.basename(file_path) + ".dds")
+                # Pixel format info at offset 76
+                pf_flags = struct.unpack('<I', dds_data[80:84])[0]
+                fourcc = dds_data[84:88]
+                
+                self.log_debug(f"DDS Info: {width}x{height}, flags={flags:08X}, pf_flags={pf_flags:08X}")
+                self.log_debug(f"FourCC: {fourcc} ({fourcc.decode('ascii', errors='ignore')})")
+                
+                # Check for common formats
+                fourcc_str = fourcc.decode('ascii', errors='ignore')
+                if fourcc_str in ['DXT1', 'DXT3', 'DXT5']:
+                    self.log_debug(f"Detected {fourcc_str} compression")
+                elif fourcc == b'\x00\x00\x00\x00':
+                    # Uncompressed format
+                    rgb_bit_count = struct.unpack('<I', dds_data[88:92])[0]
+                    self.log_debug(f"Uncompressed format, {rgb_bit_count} bits per pixel")
+                
+            # Create unique temp file name to avoid conflicts
+            import time
+            temp_name = f"{os.path.basename(file_path)}_{int(time.time() * 1000)}.dds"
+            temp_dds_path = os.path.join(self.temp_dir, temp_name)
+            
             with open(temp_dds_path, 'wb') as f:
                 f.write(dds_data)
                 
@@ -1574,20 +2192,65 @@ class MaterialViewerApp:
                 try:
                     # Try to directly load the DDS file
                     self.log_debug("Attempting to load DDS with PIL")
-                    image = Image.open(temp_dds_path)
                     
-                    # Convert to RGB if necessary
-                    if image.mode not in ('RGB', 'RGBA'):
-                        self.log_debug(f"Converting from {image.mode} to RGB")
-                        image = image.convert('RGB')
+                    # Force PIL to reload the file from disk
+                    with Image.open(temp_dds_path) as image:
+                        # Load the image data immediately
+                        image.load()
+                        
+                        # Log the loaded image info
+                        self.log_debug(f"PIL loaded: {image.size} {image.mode} format={image.format}")
+                        
+                        # Check if the image is actually loaded (not all black/corrupt)
+                        pixels = list(image.getdata())
+                        if len(pixels) > 0:
+                            # Sample some pixels to check for data
+                            sample_size = min(100, len(pixels))
+                            sample = pixels[:sample_size]
+                            
+                            # Count non-zero pixels
+                            if image.mode == 'RGB':
+                                non_zero = sum(1 for p in sample if p[0] > 0 or p[1] > 0 or p[2] > 0)
+                            elif image.mode == 'RGBA':
+                                non_zero = sum(1 for p in sample if p[0] > 0 or p[1] > 0 or p[2] > 0)
+                            elif image.mode == 'L':
+                                non_zero = sum(1 for p in sample if p > 0)
+                            else:
+                                non_zero = sample_size  # Assume it's OK for other modes
+                            
+                            self.log_debug(f"Sample check: {non_zero}/{sample_size} non-zero pixels")
+                            
+                            if non_zero == 0:
+                                self.log_debug("WARNING: Image appears to be all black!")
+                        
+                        # Create a copy to ensure we have all the data
+                        image_copy = image.copy()
                     
-                    self.log_debug(f"Successfully loaded image: {image.size} {image.mode}")
-                    return image
+                    # Convert to RGB or RGBA if necessary
+                    if image_copy.mode not in ('RGB', 'RGBA'):
+                        self.log_debug(f"Converting from {image_copy.mode} to RGB")
+                        image_copy = image_copy.convert('RGB')
+                    
+                    self.log_debug(f"Successfully loaded image: {image_copy.size} {image_copy.mode}")
+                    
+                    # Clean up temp file
+                    try:
+                        os.remove(temp_dds_path)
+                    except:
+                        pass
+                    
+                    return image_copy
                     
                 except Exception as e:
                     self.log_debug(f"PIL failed to load DDS: {e}")
                     import traceback
                     self.log_debug(traceback.format_exc())
+                    
+                    # Clean up temp file
+                    try:
+                        os.remove(temp_dds_path)
+                    except:
+                        pass
                     
                     # Create error placeholder with message
                     error_img = Image.new("RGB", (512, 512), color=(50, 50, 50))
@@ -1613,32 +2276,37 @@ class MaterialViewerApp:
         try:
             self.log_debug(f"Loading texture: {file_path}")
             
-            # Check if texture is already in cache
-            if file_path in self.texture_cache:
-                image = self.texture_cache[file_path]
-                self.log_debug("Using cached texture")
-            else:
-                # Convert XBT to image
-                image = self.convert_xbt_to_image(file_path)
-                self.log_debug(f"Converted image: {image.mode} {image.size}")
-                
-                # Cache the image
-                self.texture_cache[file_path] = image
+            # Always reload textures to avoid caching issues
+            # The cache was causing black textures when images weren't fully loaded
+            self.log_debug("Converting XBT to image (no cache)")
+            image = self.convert_xbt_to_image(file_path)
+            self.log_debug(f"Converted image: {image.mode} {image.size}")
+            
+            # Verify the image has actual data (not all black)
+            image_array = list(image.getdata())
+            non_black_pixels = sum(1 for pixel in image_array[:100] if any(c > 0 for c in pixel[:3]))
+            self.log_debug(f"Non-black pixels in first 100: {non_black_pixels}")
             
             # Store current texture info
             self.current_texture["path"] = file_path
             self.current_texture["image"] = image
             self.current_texture["original_size"] = image.size
             
+            # Clear the canvas before updating
+            self.texture_canvas.delete("all")
+            self.current_texture["canvas_image"] = None
+            self.current_texture["photo"] = None
+            
             # Update zoom label
             zoom = self.zoom_level.get()
             self.zoom_label.config(text=f"{int(zoom * 100)}%")
             
             # Update the texture view
+            self.root.update_idletasks()  # Force UI update
             self.update_texture_view()
             
             # Try to auto-fit the texture
-            self.fit_texture_to_view()
+            self.root.after(0, self.fit_texture_to_view)  # Delay to ensure canvas is ready
             
             # Update status
             self.texture_status.config(text=f"Loaded: {texture_name} [{texture_type}] - {image.width}x{image.height}")
@@ -1663,7 +2331,7 @@ class MaterialViewerApp:
             return
             
         try:
-            # Get original image
+            # Get original image and make a fresh copy
             image = self.current_texture["image"].copy()
             self.log_debug(f"Updating texture view for image: {image.mode} {image.size}")
             
@@ -1701,15 +2369,34 @@ class MaterialViewerApp:
             zoom = self.zoom_level.get()
             if zoom != 1.0:
                 new_size = (int(image.width * zoom), int(image.height * zoom))
-                image = image.resize(new_size, Image.LANCZOS)
+                
+                # Safety check: ensure size is valid
+                if new_size[0] <= 0 or new_size[1] <= 0:
+                    self.log_debug(f"Invalid zoom size: {new_size}, skipping resize")
+                    return
+                
+                # Use NEAREST for faster rendering during interaction, LANCZOS for final
+                resample_method = Image.NEAREST if hasattr(self, '_zooming') and self._zooming else Image.LANCZOS
+                image = image.resize(new_size, resample_method)
                 
                 # Update zoom label
                 self.zoom_label.config(text=f"{int(zoom * 100)}%")
             
-            # Convert to PhotoImage
-            photo = ImageTk.PhotoImage(image)
+            # Ensure the image is fully loaded before converting to PhotoImage
+            image.load()
             
-            # Update canvas
+            # Convert to PhotoImage with error handling
+            try:
+                photo = ImageTk.PhotoImage(image)
+            except Exception as e:
+                self.log_debug(f"Error creating PhotoImage: {e}")
+                # Try converting to RGB first
+                if image.mode != 'RGB':
+                    image = image.convert('RGB')
+                    image.load()
+                photo = ImageTk.PhotoImage(image)
+            
+            # Clear canvas and update
             self.texture_canvas.delete("all")
             canvas_image = self.texture_canvas.create_image(0, 0, image=photo, anchor=tk.NW)
             
@@ -1719,6 +2406,9 @@ class MaterialViewerApp:
             
             # Update scroll region
             self.update_scroll_region()
+            
+            # Force canvas to update
+            self.texture_canvas.update_idletasks()
             
         except Exception as e:
             import traceback
@@ -2115,6 +2805,7 @@ class MaterialViewerApp:
         
         # First, identify typical texture path patterns
         texture_patterns = []
+        high_quality_variants = {}  # Track _mip0 variants
         
         # Find all occurrences of graphics\ followed by a path and .xbt
         i = 0
@@ -2133,6 +2824,12 @@ class MaterialViewerApp:
                         self.log_debug(f"Found texture path: {path}")
                         texture_patterns.append((path_start, path_end, path))
                         textures_found += 1
+                        
+                        # Check if this is a high quality _mip0 variant
+                        if '_mip0.xbt' in path:
+                            base_name = path.replace('_mip0.xbt', '.xbt')
+                            high_quality_variants[base_name] = path
+                            self.log_debug(f"Found high quality variant: {path} for {base_name}")
                 
                 i = max(path_end, i + 1)
             else:
@@ -2206,7 +2903,13 @@ class MaterialViewerApp:
                         self.log_debug(f"Exception processing type at offset {type_start}")
                 
                     # Add the texture to the tree view
-                    self.texture_tree.insert("", tk.END, text=texture_name, values=(texture_type, path))
+                    # If there's a high quality variant, add note
+                    display_type = texture_type
+                    if path in high_quality_variants:
+                        display_type += " [MIP0 available]"
+                        self.log_debug(f"Texture has high quality variant: {high_quality_variants[path]}")
+                    
+                    self.texture_tree.insert("", tk.END, text=texture_name, values=(display_type, path))
                     self.log_debug(f"Added texture {idx+1}: {texture_name} ({texture_type})")
                 else:
                     # Type string too long or not found, use default
@@ -2245,6 +2948,39 @@ class MaterialViewerApp:
                 i += 1
         
         self.log_debug(f"Total textures found and added: {textures_found}")
+        
+        # Now scan for _mip0 high quality variants that exist on disk
+        if self.game_path.get():
+            self.log_debug("Scanning for _mip0 high quality texture variants...")
+            mip0_found = 0
+            
+            # Check each texture we found to see if a _mip0 version exists
+            for item in list(self.texture_tree.get_children()):
+                texture_path = self.texture_tree.item(item, "values")[1]
+                texture_type = self.texture_tree.item(item, "values")[0]
+                texture_name = self.texture_tree.item(item, "text")
+                
+                # Skip if this is already a _mip0 texture
+                if '_mip0.xbt' in texture_path.lower():
+                    continue
+                
+                # Generate the _mip0 path
+                mip0_path = texture_path.replace('.xbt', '_mip0.xbt')
+                mip0_full_path = self.fix_texture_path(mip0_path)
+                
+                # Check if the _mip0 file exists
+                if os.path.exists(mip0_full_path):
+                    mip0_name = texture_name.replace('.xbt', '_mip0.xbt')
+                    mip0_type = texture_type.replace(' [MIP0 available]', '') + ' (MIP0 High Quality)'
+                    
+                    self.log_debug(f"Found _mip0 variant: {mip0_path}")
+                    
+                    # Add the _mip0 texture to the tree (insert right after the original)
+                    index = self.texture_tree.index(item)
+                    self.texture_tree.insert("", index + 1, text=mip0_name, values=(mip0_type, mip0_path))
+                    mip0_found += 1
+            
+            self.log_debug(f"Found {mip0_found} _mip0 high quality variants on disk")
     
     def extract_all_properties(self, data):
         """Extract all properties from the file by scanning for ASCII text patterns"""
