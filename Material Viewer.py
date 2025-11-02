@@ -63,29 +63,74 @@ class MaterialViewerApp:
         self.browse_button = ttk.Button(self.top_frame, text="Open XBM...", command=self.open_file)
         self.browse_button.pack(side=tk.RIGHT, padx=5)
         
-        # Create a frame for file list
-        self.file_list_frame = ttk.LabelFrame(self.main_frame, text="Files in Directory")
-        self.file_list_frame.pack(fill=tk.X, pady=5)
+        # Create a frame for material search and file list
+        self.file_list_frame = ttk.LabelFrame(self.main_frame, text="Material Search")
+        self.file_list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Create search controls frame
+        search_controls_frame = ttk.Frame(self.file_list_frame)
+        search_controls_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Search entry
+        ttk.Label(search_controls_frame, text="Search:").pack(side=tk.LEFT, padx=(0, 5))
+        self.search_var = tk.StringVar()
+        self.search_var.trace('w', self.on_search_change)
+        search_entry = ttk.Entry(search_controls_frame, textvariable=self.search_var, width=30)
+        search_entry.pack(side=tk.LEFT, padx=5)
+        
+        # Search type selector
+        ttk.Label(search_controls_frame, text="Search by:").pack(side=tk.LEFT, padx=(10, 5))
+        self.search_type = tk.StringVar(value="Filename")
+        search_type_combo = ttk.Combobox(search_controls_frame, textvariable=self.search_type, 
+                                        values=["Filename", "Material Name", "Content (Text)"], 
+                                        width=15, state="readonly")
+        search_type_combo.pack(side=tk.LEFT, padx=5)
+        search_type_combo.bind("<<ComboboxSelected>>", lambda e: self.on_search_change())
+        
+        # Scan materials folder button
+        scan_btn = ttk.Button(search_controls_frame, text="Scan Materials Folder", 
+                             command=self.scan_materials_folder)
+        scan_btn.pack(side=tk.LEFT, padx=(10, 5))
+        
+        # Clear search button
+        clear_btn = ttk.Button(search_controls_frame, text="Clear", 
+                              command=lambda: self.search_var.set(""))
+        clear_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Results count label
+        self.results_label = ttk.Label(search_controls_frame, text="0 materials")
+        self.results_label.pack(side=tk.RIGHT, padx=5)
+        
+        # Create file list with scrollbar in a frame
+        list_container = ttk.Frame(self.file_list_frame)
+        list_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Add scrollbar first
+        file_list_scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL)
+        file_list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Create file list
-        self.file_list = ttk.Treeview(self.file_list_frame, height=4)
-        self.file_list["columns"] = ("material",)
+        self.file_list = ttk.Treeview(list_container, yscrollcommand=file_list_scrollbar.set)
+        self.file_list["columns"] = ("material", "location")
         self.file_list.heading("#0", text="File")
         self.file_list.heading("material", text="Material Name")
-        self.file_list.column("#0", width=200)
-        self.file_list.column("material", width=200)
-        self.file_list.pack(fill=tk.X, expand=True, padx=5, pady=5)
+        self.file_list.heading("location", text="Location")
+        self.file_list.column("#0", width=250)
+        self.file_list.column("material", width=250)
+        self.file_list.column("location", width=400)
+        self.file_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.file_list.bind("<Double-1>", self.on_file_select)
+        
+        # Configure scrollbar
+        file_list_scrollbar.config(command=self.file_list.yview)
         
         # Setup drag and drop if available
         if dnd_support:
             self.file_list.drop_target_register(DND_FILES)
             self.file_list.dnd_bind("<<Drop>>", self.on_drop)
-            
-        # Add scrollbar to file list
-        file_list_scrollbar = ttk.Scrollbar(self.file_list_frame, orient=tk.VERTICAL, command=self.file_list.yview)
-        file_list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.file_list.configure(yscrollcommand=file_list_scrollbar.set)
+        
+        # Store all materials data for searching
+        self.all_materials = []  # List of tuples: (filename, material_name, full_path, content_preview)
         
         # Create content frame with paned window
         self.content_frame = ttk.PanedWindow(self.main_frame, orient=tk.HORIZONTAL)
@@ -271,8 +316,9 @@ class MaterialViewerApp:
         self.status_bar = ttk.Label(self.main_frame, text="Ready", relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(fill=tk.X, side=tk.BOTTOM, pady=2)
         
-        # Initialize material cache
+        # Initialize material cache and search state
         self.material_cache = {}
+        self.search_in_progress = False
         
         # Initialize texture cache
         self.texture_cache = {}
@@ -782,12 +828,401 @@ class MaterialViewerApp:
     
     def setup_material_preview(self):
         """Set up the material preview panel"""
-        # Add a simple message for now
-        ttk.Label(self.material_preview_frame, 
-                 text="Material preview not implemented yet.").pack(padx=20, pady=20)
+        # Create control panel at top
+        control_frame = ttk.Frame(self.material_preview_frame)
+        control_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        # Future implementation would combine diffuse, normal, specular maps
-        # to create a realistic material preview
+        ttk.Label(control_frame, text="Preview Mode:").pack(side=tk.LEFT, padx=5)
+        
+        self.preview_mode = tk.StringVar(value="Combined")
+        mode_combo = ttk.Combobox(control_frame, textvariable=self.preview_mode,
+                                 values=["Combined", "Diffuse Only", "Normal Only", "Specular Only", "Reconstructed Normal"],
+                                 state="readonly", width=20)
+        mode_combo.pack(side=tk.LEFT, padx=5)
+        mode_combo.bind("<<ComboboxSelected>>", lambda e: self.update_material_preview())
+        
+        # Lighting toggle
+        self.preview_lighting = tk.BooleanVar(value=True)
+        ttk.Checkbutton(control_frame, text="Apply Lighting", 
+                       variable=self.preview_lighting,
+                       command=self.update_material_preview).pack(side=tk.LEFT, padx=10)
+        
+        # Refresh button
+        ttk.Button(control_frame, text="Refresh Preview", 
+                  command=self.update_material_preview).pack(side=tk.RIGHT, padx=5)
+        
+        # Create canvas for preview
+        canvas_frame = ttk.Frame(self.material_preview_frame)
+        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        self.preview_canvas = tk.Canvas(canvas_frame, bg="grey30")
+        self.preview_canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # Status label
+        self.preview_status = ttk.Label(self.material_preview_frame, 
+                                       text="No material loaded")
+        self.preview_status.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Store preview data
+        self.preview_data = {
+            "diffuse": None,
+            "normal": None,
+            "specular": None,
+            "combined": None,
+            "photo": None
+        }
+    
+    def update_material_preview(self):
+        """Update the material preview based on loaded textures"""
+        if not pil_support:
+            self.preview_status.config(text="PIL/Pillow not installed. Cannot generate preview.")
+            return
+        
+        try:
+            # Get game path
+            game_path = self.game_path.get()
+            if not game_path:
+                self.preview_status.config(text="Please set game data folder path")
+                return
+            
+            # Find diffuse, normal, and specular textures
+            diffuse_path = None
+            normal_path = None
+            specular_path = None
+            
+            for item in self.texture_tree.get_children():
+                texture_type = self.texture_tree.item(item, "values")[0]
+                texture_path = self.texture_tree.item(item, "values")[1]
+                
+                full_path = self.fix_texture_path(texture_path)
+                
+                if not os.path.exists(full_path):
+                    continue
+                
+                # Identify texture type based on naming and type
+                if "Diffuse" in texture_type or "_d.xbt" in texture_path.lower():
+                    diffuse_path = full_path
+                elif "Normal" in texture_type or "_n.xbt" in texture_path.lower():
+                    normal_path = full_path
+                elif "Specular" in texture_type or "Mask" in texture_type or "_m.xbt" in texture_path.lower():
+                    specular_path = full_path  # This is the M/bio mask
+            
+            # Load textures
+            mode = self.preview_mode.get()
+            
+            if mode == "Diffuse Only" and diffuse_path:
+                preview_img = self.convert_xbt_to_image(diffuse_path)
+                self.preview_data["diffuse"] = preview_img
+            elif mode == "Normal Only" and normal_path:
+                preview_img = self.convert_xbt_to_image(normal_path)
+                self.preview_data["normal"] = preview_img
+            elif mode == "Specular Only" and specular_path:
+                preview_img = self.convert_xbt_to_image(specular_path)
+                self.preview_data["specular"] = preview_img
+            elif mode == "Reconstructed Normal" and normal_path:
+                # Load and reconstruct the normal map
+                normal_tex = self.convert_xbt_to_image(normal_path)
+                preview_img = self.reconstruct_normal_map(normal_tex)
+                self.preview_data["normal"] = normal_tex
+            elif mode == "Combined":
+                # Load all available textures
+                if diffuse_path:
+                    self.preview_data["diffuse"] = self.convert_xbt_to_image(diffuse_path)
+                if normal_path:
+                    self.preview_data["normal"] = self.convert_xbt_to_image(normal_path)
+                if specular_path:
+                    self.preview_data["specular"] = self.convert_xbt_to_image(specular_path)
+                
+                # Combine textures
+                preview_img = self.combine_material_maps()
+            else:
+                self.preview_status.config(text="Required texture not found")
+                return
+            
+            # Display preview
+            if preview_img:
+                # Resize to fit canvas
+                canvas_width = self.preview_canvas.winfo_width()
+                canvas_height = self.preview_canvas.winfo_height()
+                
+                if canvas_width > 1 and canvas_height > 1:
+                    # Calculate scale to fit
+                    scale = min(canvas_width / preview_img.width, 
+                               canvas_height / preview_img.height) * 0.9
+                    
+                    new_size = (int(preview_img.width * scale), 
+                               int(preview_img.height * scale))
+                    preview_img = preview_img.resize(new_size, Image.LANCZOS)
+                
+                # Convert to PhotoImage
+                photo = ImageTk.PhotoImage(preview_img)
+                
+                # Display on canvas
+                self.preview_canvas.delete("all")
+                x = self.preview_canvas.winfo_width() // 2
+                y = self.preview_canvas.winfo_height() // 2
+                self.preview_canvas.create_image(x, y, image=photo)
+                
+                # Store reference
+                self.preview_data["photo"] = photo
+                
+                self.preview_status.config(text=f"Preview: {mode} ({preview_img.width}x{preview_img.height})")
+            
+        except Exception as e:
+            import traceback
+            self.log_debug(f"Error updating material preview: {e}")
+            self.log_debug(traceback.format_exc())
+            self.preview_status.config(text=f"Error: {e}")
+    
+    def combine_material_maps(self):
+        """Combine diffuse, normal, and specular maps into a preview"""
+        try:
+            diffuse = self.preview_data.get("diffuse")
+            normal = self.preview_data.get("normal")
+            mask = self.preview_data.get("specular")  # This is actually the M/bio mask
+            
+            if not diffuse:
+                return None
+            
+            # Start with diffuse as base
+            result = diffuse.copy().convert('RGBA')
+            result_pixels = result.load()
+            
+            # Get illumination color for bio/emission
+            illumination_color = self.get_illumination_color()
+            
+            # Apply lighting if enabled
+            if self.preview_lighting.get():
+                # Reconstruct normal map properly
+                if normal:
+                    # Resize normal map if needed
+                    if normal.size != result.size:
+                        normal = normal.resize(result.size, Image.LANCZOS)
+                    
+                    # Reconstruct the normal map from packed format
+                    normal_reconstructed = self.reconstruct_normal_map(normal)
+                    
+                    # Apply simple lighting using reconstructed normal
+                    result = self.apply_simple_lighting(result, normal_reconstructed)
+                
+                # Apply bio/emission mask with illumination color
+                if mask and illumination_color:
+                    # Resize mask if needed
+                    if mask.size != result.size:
+                        mask = mask.resize(result.size, Image.LANCZOS)
+                    
+                    result = self.apply_bio_emission(result, mask, illumination_color)
+            
+            return result
+            
+        except Exception as e:
+            self.log_debug(f"Error combining material maps: {e}")
+            import traceback
+            self.log_debug(traceback.format_exc())
+            return self.preview_data.get("diffuse")
+    
+    def reconstruct_normal_map(self, normal_texture):
+        """Reconstruct normal map from packed format.
+        
+        In Avatar's format:
+        - G channel contains the Y (green) normal component
+        - A channel contains the X (red) normal component  
+        - B channel needs to be calculated from X and Y
+        """
+        try:
+            self.log_debug("Reconstructing normal map from packed format")
+            
+            # Convert to RGBA to access all channels
+            if normal_texture.mode != 'RGBA':
+                normal_texture = normal_texture.convert('RGBA')
+            
+            width, height = normal_texture.size
+            reconstructed = Image.new('RGB', (width, height))
+            
+            normal_pixels = normal_texture.load()
+            recon_pixels = reconstructed.load()
+            
+            for y in range(height):
+                for x in range(width):
+                    r, g, b, a = normal_pixels[x, y]
+                    
+                    # Extract components:
+                    # X (red) is stored in alpha channel
+                    # Y (green) is stored in green channel
+                    nx = (a / 255.0) * 2.0 - 1.0  # Remap from [0,255] to [-1,1]
+                    ny = (g / 255.0) * 2.0 - 1.0  # Remap from [0,255] to [-1,1]
+                    
+                    # Calculate Z (blue) component: Z = sqrt(1 - X² - Y²)
+                    # This assumes the normal is normalized
+                    nz_squared = max(0.0, 1.0 - nx*nx - ny*ny)
+                    nz = nz_squared ** 0.5
+                    
+                    # Convert back to [0,255] range
+                    final_r = int((nx + 1.0) * 0.5 * 255)
+                    final_g = int((ny + 1.0) * 0.5 * 255)
+                    final_b = int((nz + 1.0) * 0.5 * 255)
+                    
+                    # Clamp values
+                    final_r = max(0, min(255, final_r))
+                    final_g = max(0, min(255, final_g))
+                    final_b = max(0, min(255, final_b))
+                    
+                    recon_pixels[x, y] = (final_r, final_g, final_b)
+            
+            self.log_debug("Normal map reconstruction complete")
+            return reconstructed
+            
+        except Exception as e:
+            self.log_debug(f"Error reconstructing normal map: {e}")
+            import traceback
+            self.log_debug(traceback.format_exc())
+            return normal_texture.convert('RGB')
+    
+    def apply_simple_lighting(self, diffuse, normal_map):
+        """Apply simple directional lighting using the normal map"""
+        try:
+            self.log_debug("Applying lighting based on normal map")
+            
+            # Simple light direction (from top-left-front)
+            light_dir = (0.5, 0.5, 0.8)  # Normalized-ish direction
+            
+            width, height = diffuse.size
+            result = diffuse.copy()
+            
+            diffuse_pixels = diffuse.load()
+            normal_pixels = normal_map.load()
+            result_pixels = result.load()
+            
+            for y in range(height):
+                for x in range(width):
+                    # Get normal from normal map
+                    nr, ng, nb = normal_pixels[x, y]
+                    
+                    # Convert to [-1, 1] range
+                    nx = (nr / 255.0) * 2.0 - 1.0
+                    ny = (ng / 255.0) * 2.0 - 1.0
+                    nz = (nb / 255.0) * 2.0 - 1.0
+                    
+                    # Calculate dot product with light direction
+                    dot = max(0.0, nx * light_dir[0] + ny * light_dir[1] + nz * light_dir[2])
+                    
+                    # Apply to diffuse color
+                    if diffuse.mode == 'RGBA':
+                        dr, dg, db, da = diffuse_pixels[x, y]
+                    else:
+                        dr, dg, db = diffuse_pixels[x, y]
+                        da = 255
+                    
+                    # Mix ambient (0.3) and diffuse lighting
+                    ambient = 0.3
+                    lighting = ambient + (1.0 - ambient) * dot
+                    
+                    lit_r = int(dr * lighting)
+                    lit_g = int(dg * lighting)
+                    lit_b = int(db * lighting)
+                    
+                    # Clamp values
+                    lit_r = max(0, min(255, lit_r))
+                    lit_g = max(0, min(255, lit_g))
+                    lit_b = max(0, min(255, lit_b))
+                    
+                    result_pixels[x, y] = (lit_r, lit_g, lit_b, da)
+            
+            self.log_debug("Lighting application complete")
+            return result
+            
+        except Exception as e:
+            self.log_debug(f"Error applying lighting: {e}")
+            import traceback
+            self.log_debug(traceback.format_exc())
+            return diffuse
+    
+    def apply_bio_emission(self, base_image, mask_texture, illumination_color):
+        """Apply bio/emission glow using the mask and illumination color"""
+        try:
+            self.log_debug(f"Applying bio emission with color: {illumination_color}")
+            
+            width, height = base_image.size
+            result = base_image.copy()
+            
+            base_pixels = base_image.load()
+            mask_pixels = mask_texture.load()
+            result_pixels = result.load()
+            
+            # Parse illumination color
+            if illumination_color.startswith('#'):
+                illumination_color = illumination_color[1:]
+            
+            illum_r = int(illumination_color[0:2], 16)
+            illum_g = int(illumination_color[2:4], 16)
+            illum_b = int(illumination_color[4:6], 16)
+            
+            self.log_debug(f"Illumination RGB: ({illum_r}, {illum_g}, {illum_b})")
+            
+            for y in range(height):
+                for x in range(width):
+                    # Get mask value (use red channel as intensity)
+                    if mask_texture.mode == 'RGBA':
+                        mask_r, mask_g, mask_b, mask_a = mask_pixels[x, y]
+                    else:
+                        mask_r, mask_g, mask_b = mask_pixels[x, y]
+                    
+                    # Use red channel as emission mask intensity
+                    emission_strength = mask_r / 255.0
+                    
+                    # Get base color
+                    if base_image.mode == 'RGBA':
+                        br, bg, bb, ba = base_pixels[x, y]
+                    else:
+                        br, bg, bb = base_pixels[x, y]
+                        ba = 255
+                    
+                    # Blend emission color on top of base
+                    final_r = int(br * (1.0 - emission_strength) + illum_r * emission_strength)
+                    final_g = int(bg * (1.0 - emission_strength) + illum_g * emission_strength)
+                    final_b = int(bb * (1.0 - emission_strength) + illum_b * emission_strength)
+                    
+                    # Add extra brightness for emission
+                    boost = 1.5  # Emission brightness boost
+                    final_r = min(255, int(final_r + (illum_r * emission_strength * boost)))
+                    final_g = min(255, int(final_g + (illum_g * emission_strength * boost)))
+                    final_b = min(255, int(final_b + (illum_b * emission_strength * boost)))
+                    
+                    result_pixels[x, y] = (final_r, final_g, final_b, ba)
+            
+            self.log_debug("Bio emission application complete")
+            return result
+            
+        except Exception as e:
+            self.log_debug(f"Error applying bio emission: {e}")
+            import traceback
+            self.log_debug(traceback.format_exc())
+            return base_image
+    
+    def get_illumination_color(self):
+        """Get the IlluminationColor1 value from the material"""
+        try:
+            # Search through the normalized color tree for IlluminationColor1
+            for item in self.norm_color_tree.get_children():
+                color_name = self.norm_color_tree.item(item, "text")
+                if "IlluminationColor1" in color_name or "illuminationcolor1" in color_name.lower():
+                    values = self.norm_color_tree.item(item, "values")
+                    r = float(values[0])
+                    g = float(values[1])
+                    b = float(values[2])
+                    
+                    # Convert to hex color
+                    hex_color = f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
+                    self.log_debug(f"Found IlluminationColor1: {hex_color}")
+                    return hex_color
+            
+            # Default to white if not found
+            self.log_debug("IlluminationColor1 not found, using white")
+            return "#ffffff"
+            
+        except Exception as e:
+            self.log_debug(f"Error getting illumination color: {e}")
+            return "#ffffff"
     
     def setup_color_viewer(self):
         """Set up the color viewer panel"""
@@ -1007,10 +1442,16 @@ class MaterialViewerApp:
     
     def on_file_select(self, event):
         """Handle file selection from the file list"""
-        item = self.file_list.selection()[0]
-        file_path = self.file_list.item(item, "text")
-        full_path = os.path.join(os.getcwd(), file_path)
-        self.open_specific_file(full_path)
+        selection = self.file_list.selection()
+        if not selection:
+            return
+        
+        item = selection[0]
+        # Get full path from tags
+        tags = self.file_list.item(item, "tags")
+        if tags:
+            full_path = tags[0]
+            self.open_specific_file(full_path)
     
     def view_texture_from_list(self, event):
         """Handle double-click on texture in texture list"""
@@ -1102,57 +1543,64 @@ class MaterialViewerApp:
             
             # Check if this has an XBT header (TBX)
             if xbt_data[:3] == b'TBX':
-                self.log_debug("TBX header found, removing first 32 bytes")
-                dds_data = xbt_data[32:]  # Skip XBT header (32 bytes)
+                self.log_debug("TBX header found, removing header bytes")
+                # XBT header is 32 bytes
+                dds_data = xbt_data[32:]
             else:
                 self.log_debug("No TBX header found, trying full data as DDS")
                 dds_data = xbt_data
+            
+            # Verify DDS signature
+            if len(dds_data) < 4 or dds_data[:4] != b'DDS ':
+                self.log_debug("Invalid DDS signature after header removal")
+                # Try alternate header sizes
+                for header_size in [64, 128, 256]:
+                    if len(xbt_data) > header_size:
+                        test_data = xbt_data[header_size:]
+                        if len(test_data) >= 4 and test_data[:4] == b'DDS ':
+                            self.log_debug(f"Found valid DDS at offset {header_size}")
+                            dds_data = test_data
+                            break
                 
             # Save the DDS data to a temporary file
             temp_dds_path = os.path.join(self.temp_dir, os.path.basename(file_path) + ".dds")
             with open(temp_dds_path, 'wb') as f:
                 f.write(dds_data)
                 
-            self.log_debug(f"Saved DDS data to {temp_dds_path}")
+            self.log_debug(f"Saved DDS data to {temp_dds_path} ({len(dds_data)} bytes)")
             
-            # Simple fallback: convert DDS to PNG using PIL
+            # Load DDS file with PIL
             if pil_support:
                 try:
                     # Try to directly load the DDS file
                     self.log_debug("Attempting to load DDS with PIL")
                     image = Image.open(temp_dds_path)
+                    
+                    # Convert to RGB if necessary
+                    if image.mode not in ('RGB', 'RGBA'):
+                        self.log_debug(f"Converting from {image.mode} to RGB")
+                        image = image.convert('RGB')
+                    
+                    self.log_debug(f"Successfully loaded image: {image.size} {image.mode}")
                     return image
+                    
                 except Exception as e:
                     self.log_debug(f"PIL failed to load DDS: {e}")
+                    import traceback
+                    self.log_debug(traceback.format_exc())
                     
-                    # If PIL fails to load directly, try with a different approach
-                    try:
-                        # Make sure it's actually a DDS file (check for signature)
-                        with open(temp_dds_path, 'rb') as f:
-                            if f.read(4) == b'DDS ':
-                                self.log_debug("Valid DDS file signature found")
-                            else:
-                                self.log_debug("DDS signature not found, trying with 32-byte offset")
-                                # Try again with different offset
-                                if len(xbt_data) > 64:
-                                    dds_data = xbt_data[32:]
-                                    with open(temp_dds_path, 'wb') as f:
-                                        f.write(dds_data)
-                        
-                        # Try loading again
-                        image = Image.open(temp_dds_path)
-                        return image
-                    except Exception as err:
-                        self.log_debug(f"All loading attempts failed: {err}")
-                        # Last resort, create a placeholder image
-                        return Image.new("RGB", (256, 256), color=(50, 50, 50))
+                    # Create error placeholder with message
+                    error_img = Image.new("RGB", (512, 512), color=(50, 50, 50))
+                    self.log_debug("Created error placeholder image")
+                    return error_img
             else:
                 self.log_debug("PIL not available, creating placeholder image")
-                # If PIL is not available, create a dummy image
                 return Image.new("RGB", (256, 256), color=(50, 50, 50))
                 
         except Exception as e:
             self.log_debug(f"Error converting XBT to image: {e}")
+            import traceback
+            self.log_debug(traceback.format_exc())
             # Return a placeholder image if conversion fails
             return Image.new("RGB", (256, 256), color=(50, 50, 50))
     
@@ -1338,30 +1786,166 @@ class MaterialViewerApp:
     def check_current_directory(self):
         """Check for .xbm files in current directory"""
         current_dir = os.getcwd()
-        xbm_files = [f for f in os.listdir(current_dir) if f.lower().endswith('.xbm')]
+        self.scan_directory(current_dir)
         
-        # Clear file list
+        # If materials found, open the first one
+        if self.all_materials:
+            self.open_specific_file(self.all_materials[0][2])
+        else:
+            self.file_label.config(text="No .xbm files found. Use 'Scan Materials Folder' or Browse button.")
+    
+    def scan_materials_folder(self):
+        """Scan the materials folder specified in the game path"""
+        materials_path = r"D:\Games\Avatar The Game\Data_Win32\Data\graphics\_materials"
+        
+        if not os.path.exists(materials_path):
+            messagebox.showerror("Folder Not Found", 
+                               f"Materials folder not found at:\n{materials_path}\n\n"
+                               f"Please verify the game installation path.")
+            return
+        
+        self.scan_directory(materials_path)
+    
+    def scan_directory(self, directory):
+        """Scan a directory for .xbm files and populate the materials list"""
+        if self.search_in_progress:
+            return
+        
+        self.search_in_progress = True
+        self.status_bar.config(text=f"Scanning {directory}...")
+        
+        # Clear current data
+        self.all_materials = []
+        
+        # Use threading to avoid UI freezing
+        def scan_thread():
+            try:
+                xbm_files = []
+                
+                # Walk through directory and subdirectories
+                for root, dirs, files in os.walk(directory):
+                    for file in files:
+                        if file.lower().endswith('.xbm'):
+                            full_path = os.path.join(root, file)
+                            xbm_files.append(full_path)
+                
+                # Process each file
+                for i, file_path in enumerate(xbm_files):
+                    # Check if material name is cached
+                    if file_path in self.material_cache:
+                        material_name, content_preview = self.material_cache[file_path]
+                    else:
+                        material_name = self.get_material_name_from_file(file_path)
+                        content_preview = self.get_content_preview(file_path)
+                        self.material_cache[file_path] = (material_name, content_preview)
+                    
+                    # Get relative path for display
+                    try:
+                        rel_path = os.path.relpath(file_path, directory)
+                    except:
+                        rel_path = file_path
+                    
+                    self.all_materials.append((
+                        os.path.basename(file_path),
+                        material_name,
+                        file_path,
+                        content_preview,
+                        rel_path
+                    ))
+                    
+                    # Update progress
+                    if i % 10 == 0:
+                        self.root.after(0, lambda p=i, t=len(xbm_files): 
+                                       self.status_bar.config(text=f"Scanned {p}/{t} files..."))
+                
+                # Update UI when done
+                self.root.after(0, self.update_materials_display)
+                
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Scan Error", f"Error scanning directory: {e}"))
+            finally:
+                self.search_in_progress = False
+                self.root.after(0, lambda: self.status_bar.config(text="Scan complete"))
+        
+        # Start scan in background thread
+        thread = threading.Thread(target=scan_thread, daemon=True)
+        thread.start()
+    
+    def get_content_preview(self, file_path):
+        """Get a preview of file content for searching (texture names, etc.)"""
+        try:
+            with open(file_path, 'rb') as f:
+                data = f.read(4096)  # Read first 4KB
+                
+            # Extract readable ASCII strings (potential texture names, properties, etc.)
+            text_content = []
+            current_str = []
+            
+            for byte in data:
+                if 32 <= byte <= 126:  # Printable ASCII
+                    current_str.append(chr(byte))
+                else:
+                    if len(current_str) >= 4:  # Minimum string length
+                        text_content.append(''.join(current_str))
+                    current_str = []
+            
+            # Add last string if any
+            if len(current_str) >= 4:
+                text_content.append(''.join(current_str))
+            
+            return ' '.join(text_content).lower()
+            
+        except Exception:
+            return ""
+    
+    def on_search_change(self, *args):
+        """Handle search text change"""
+        self.update_materials_display()
+    
+    def update_materials_display(self):
+        """Update the materials list based on current search criteria"""
+        # Clear current list
         for item in self.file_list.get_children():
             self.file_list.delete(item)
         
-        if xbm_files:
-            # For each .xbm file, get material name and add to list
-            for file_name in xbm_files:
-                file_path = os.path.join(current_dir, file_name)
-                
-                # Check if material name is cached
-                if file_path in self.material_cache:
-                    material_name = self.material_cache[file_path]
-                else:
-                    material_name = self.get_material_name_from_file(file_path)
-                    self.material_cache[file_path] = material_name
-                
-                self.file_list.insert("", tk.END, text=file_name, values=(material_name,))
+        search_text = self.search_var.get().lower()
+        search_type = self.search_type.get()
+        
+        # Filter materials based on search
+        filtered_materials = []
+        
+        for filename, material_name, full_path, content_preview, rel_path in self.all_materials:
+            match = False
             
-            # Open the first file
-            self.open_specific_file(os.path.join(current_dir, xbm_files[0]))
+            if not search_text:  # No search, show all
+                match = True
+            elif search_type == "Filename":
+                match = search_text in filename.lower()
+            elif search_type == "Material Name":
+                match = search_text in material_name.lower()
+            elif search_type == "Content (Text)":
+                match = search_text in content_preview
+            
+            if match:
+                filtered_materials.append((filename, material_name, full_path, rel_path))
+        
+        # Sort by filename
+        filtered_materials.sort(key=lambda x: x[0].lower())
+        
+        # Add to tree
+        for filename, material_name, full_path, rel_path in filtered_materials:
+            self.file_list.insert("", tk.END, text=filename, 
+                                 values=(material_name, rel_path),
+                                 tags=(full_path,))
+        
+        # Update results count
+        self.results_label.config(text=f"{len(filtered_materials)} materials")
+        
+        # Update status
+        if filtered_materials:
+            self.status_bar.config(text=f"Found {len(filtered_materials)} materials")
         else:
-            self.file_label.config(text="No .xbm files found in current directory. Please use Browse button.")
+            self.status_bar.config(text="No materials found matching search")
     
     def get_material_name_from_file(self, file_path):
         """Extract just the material name from a file without loading everything"""
@@ -1369,12 +1953,22 @@ class MaterialViewerApp:
             with open(file_path, 'rb') as f:
                 data = f.read(1024)  # Just read the first 1KB which should contain the material name
                 
-                # Look for a pattern like "DUMPTRUCK_PART\x00..."
-                for match in re.finditer(b'[A-Z0-9_]{5,}\\x00', data):
-                    name = match.group(0)[:-1].decode('ascii', errors='ignore')
-                    if '_PART' in name or '_WINGS' in name or len(name) > 8:
+            # Look for material name patterns
+            # Try different patterns
+            patterns = [
+                rb'([A-Z][A-Z0-9_]{5,})\x00',  # Standard pattern
+                rb'([a-z][a-z0-9_]{5,})\x00',  # Lowercase pattern
+            ]
+            
+            for pattern in patterns:
+                for match in re.finditer(pattern, data):
+                    name = match.group(1).decode('ascii', errors='ignore')
+                    # Filter for likely material names
+                    if len(name) >= 6 and ('_' in name or name.isupper()):
                         return name
-            return "Unknown"
+            
+            # Fallback: use filename without extension
+            return os.path.splitext(os.path.basename(file_path))[0]
         except Exception:
             return "Error"
     
@@ -1434,6 +2028,10 @@ class MaterialViewerApp:
             
             # Update status bar
             self.status_bar.config(text=f"Loaded material: {os.path.basename(file_path)}")
+            
+            # Trigger material preview update if textures are available
+            if self.game_path.get() and os.path.exists(self.game_path.get()):
+                self.root.after(500, self.update_material_preview)
             
         except Exception as e:
             import traceback
